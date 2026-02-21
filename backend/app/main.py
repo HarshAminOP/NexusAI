@@ -1,176 +1,114 @@
 import os
-from typing import Annotated, List, Union, Optional
-from typing_extensions import TypedDict
+import json
+import logging
+from typing import Annotated, List
 from dotenv import load_dotenv
 
-# LangChain Core
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import (
-    BaseMessage, 
-    HumanMessage, 
-    AIMessage, 
-    SystemMessage, 
-    trim_messages
-)
+# FastAPI & AWS Bridge
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sse_starlette.sse import EventSourceResponse
+from mangum import Mangum
 
-# LangGraph Core
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-
-# Persistence Drivers (Ensure these are installed via pip)
+# LangChain / LangGraph Core
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import StateGraph, START, END
+
+# Project Modules
+from app.agents.orchestrator import master_app  # The Phase 2 R1 Brain
+from app.schema.state import OrchestratorState
+from app.schema.api_models import ChatRequest
+from app.services.neo4j_service import graph_service
+
+# Load Environment
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("NexusAPI")
+
+app = FastAPI(title="NexusAI Production Gateway")
+
+# --- 1. ENVIRONMENT & PERSISTENCE (Phase 1 Logic) ---
+IS_AWS = os.getenv("AWS_LAMBDA_FUNCTION_NAME") is not None
 try:
     from langgraph_checkpoint_aws.dynamodb import DynamoDBSaver
 except ImportError:
-    # Fallback for local dev if AWS driver isn't installed yet
     DynamoDBSaver = None
-
-# ==========================================
-# 1. ENVIRONMENT & IDENTITY (Rule #4 & #8)
-# ==========================================
-
-load_dotenv()
-IS_AWS = os.getenv("AWS_LAMBDA_FUNCTION_NAME") is not None
-
-# The "Permanent Identity" of NexusAI
-NEXUS_SYSTEM_PROMPT = (
-    "You are NexusAI, a high-performance Multimodal Graphical RAG System. "
-    "Tech Stack: Next.js, Python, LangGraph, Neo4j, and AWS. "
-    "Persona: Professional, technical, and architectural. "
-    "Memory: You have access to a recursive summary of previous interactions."
-)
-
-# ==========================================
-# 2. PERSISTENCE ABSTRACTION (The Switch)
-# ==========================================
 
 if IS_AWS and DynamoDBSaver:
     TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME", "NexusAI_Checkpoints")
     checkpointer = DynamoDBSaver(table_name=TABLE_NAME)
-    print(f"☁️ Persistence: AWS DynamoDB ({TABLE_NAME})")
+    logger.info("☁️ Using AWS DynamoDB Persistence")
 else:
-    # On your Mac ARM, we use SQLite for zero-config persistence
-    memory_db = SqliteSaver.from_conn_string("nexus_memory.sqlite")
-    checkpointer = memory_db
-    print("🚀 Persistence: Local SQLite (nexus_memory.sqlite)")
+    checkpointer = SqliteSaver.from_conn_string("nexus_memory.sqlite")
+    logger.info("🚀 Using Local SQLite Persistence")
 
-# ==========================================
-# 3. STATE DEFINITION (The "Shared Notebook")
-# ==========================================
-
-class AgentState(TypedDict):
-    """
-    Technically managing the balance between context density and token cost.
-    """
-    # Public Chat History (The list users see)
-    messages: Annotated[List[BaseMessage], add_messages]
-    
-    # Permanent compressed memory
-    summary: str
-    
-    # Internal Scratchpad (Separated from public chat)
-    intermediate_steps: List[str]
-
-# ==========================================
-# 4. MODEL INITIALIZATION (Hybrid Logic)
-# ==========================================
-
-OPENROUTER_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-API_KEY = os.getenv("OPENROUTER_API_KEY")
-
-# The Architect (Reasoning)
-reasoning_llm = ChatOpenAI(
-    model="deepseek/deepseek-r1",
-    openai_api_key=API_KEY,
-    openai_api_base=OPENROUTER_URL,
-)
-
-# The Clerk (Execution & Summarization)
-tool_llm = ChatOpenAI(
-    model="deepseek/deepseek-chat", # DeepSeek V3
-    openai_api_key=API_KEY, 
-    openai_api_base=OPENROUTER_URL,
+# --- 2. RECURSIVE SUMMARIZATION (Phase 1 Logic) ---
+from langchain_openai import ChatOpenAI
+summarizer_llm = ChatOpenAI(
+    model="deepseek/deepseek-chat",
+    openai_api_key=os.getenv("OPENROUTER_API_KEY"),
+    openai_api_base=os.getenv("OPENROUTER_BASE_URL"),
     temperature=0
 )
 
-# ==========================================
-# 5. NODES (The Logic Steps)
-# ==========================================
-
-def summarizer_node(state: AgentState):
-    """
-    RECURSIVE MEMORY: Compresses history if it exceeds 6 messages.
-    Ensures 'Long-term' memory without context window bloat.
-    """
+def global_summarizer(state: OrchestratorState):
     messages = state["messages"]
-    if len(messages) <= 6:
+    if len(messages) <= 10:
         return {"summary": state.get("summary", "")}
 
     summary_content = state.get("summary", "")
     prompt = (
         f"Current Summary: {summary_content}\n\n"
-        "Incorporate the following new messages into a concise, technical update "
-        "to the running summary, preserving all project context and architecture decisions."
+        "Synthesize the project history into a concise architectural summary, "
+        "retaining all Neo4j graph findings and technical decisions."
     )
-    
-    # We summarize older messages, keeping the last 3 for immediate context
-    response = tool_llm.invoke([SystemMessage(content=prompt)] + messages[:-3])
-    
-    # We return the new summary and 'truncate' the messages in the state
-    return {
-        "summary": response.content,
-        "messages": messages[-3:] 
-    }
+    response = summarizer_llm.invoke([SystemMessage(content=prompt)] + messages[:-3])
+    return {"summary": response.content, "messages": messages[-3:]}
 
-def brain_node(state: AgentState):
-    """
-    REASONING: The core thinking step using DeepSeek R1.
-    """
-    summary = state.get("summary", "")
-    
-    # Injecting identity + historical summary into the prompt
-    full_system_prompt = (
-        f"{NEXUS_SYSTEM_PROMPT}\n\n"
-        f"CONTEXT SUMMARY: {summary if summary else 'No previous history.'}"
-    )
-    
-    payload = [SystemMessage(content=full_system_prompt)] + state["messages"]
-    response = reasoning_llm.invoke(payload)
-    
-    return {"messages": [response]}
+# --- 3. ORCHESTRATION WRAPPER ---
+def run_orchestrator(state: OrchestratorState):
+    # This calls the R1 -> Librarian -> R1 Subgraph from orchestrator.py
+    return master_app.invoke(state)
 
-# ==========================================
-# 6. GRAPH CONSTRUCTION
-# ==========================================
-
-workflow = StateGraph(AgentState)
-
-workflow.add_node("summarizer", summarizer_node)
-workflow.add_node("brain", brain_node)
-
-# Flow: Always attempt to summarize before reasoning
+# --- 4. GRAPH COMPILATION ---
+workflow = StateGraph(OrchestratorState)
+workflow.add_node("summarizer", global_summarizer)
+workflow.add_node("orchestrator", run_orchestrator)
 workflow.add_edge(START, "summarizer")
-workflow.add_edge("summarizer", "brain")
-workflow.add_edge("brain", END)
+workflow.add_edge("summarizer", "orchestrator")
+workflow.add_edge("orchestrator", END)
 
-# Compile with the Checkpointer for automatic DB saving
-app = workflow.compile(checkpointer=checkpointer)
+nexus_ai = workflow.compile(checkpointer=checkpointer)
 
-# ==========================================
-# 7. LOCAL TEST EXECUTION
-# ==========================================
+# --- 5. API ENDPOINTS & STREAMING ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/chat/stream")
+async def stream_chat(request: ChatRequest):
+    config = {"configurable": {"thread_id": request.thread_id}}
+    input_data = {"messages": [HumanMessage(content=request.message)]}
+
+    async def event_generator():
+        # astreams through the global summarizer AND the orchestrator
+        async for event in nexus_ai.astream(input_data, config=config, stream_mode="updates"):
+            if event:
+                yield {
+                    "event": "message",
+                    "data": json.dumps(event)
+                }
+
+    return EventSourceResponse(event_generator())
+
+# --- 6. AWS LAMBDA HANDLER ---
+handler = Mangum(app, lifespan="off")
 
 if __name__ == "__main__":
-    # Test execution with a specific Thread ID for persistence
-    config = {"configurable": {"thread_id": "architect_session_001"}}
-    
-    # Sample Input
-    inputs = {"messages": [HumanMessage(content="Initialize system check. Who are you?")]}
-    
-    print("\n--- NexusAI Phase 1 Boot ---")
-    for output in app.stream(inputs, config=config):
-        for node, value in output.items():
-            print(f"\n[Node: {node}]")
-            if "messages" in value:
-                print(f"Response: {value['messages'][-1].content}")
-    print("\n--- End of Stream ---")
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

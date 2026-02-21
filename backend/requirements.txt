@@ -3,16 +3,18 @@ langgraph>=0.2.0
 langchain-openai>=0.1.0
 python-dotenv>=1.0.0
 
-# --- Persistence Layer ---
-# SQLite for your local Mac ARM development
-langgraph-checkpoint-sqlite>=2.0.0
-
-# DynamoDB for your AWS production deployment
-# Note: This is environment-aware and only used if IS_AWS is True
-langgraph-checkpoint-aws>=1.0.0
-
-# --- Networking & Utilities ---
-# We will need these for the FastAPI bridge in Module 4
+# --- Web & API Layer ---
 fastapi>=0.110.0
 uvicorn>=0.29.0
+mangum>=0.17.0
+sse-starlette>=2.1.0
+pydantic>=2.0.0
+
+# --- Database & Persistence ---
+neo4j>=5.18.0
+langgraph-checkpoint-sqlite>=2.0.0
+# Only used in AWS environment
+langgraph-checkpoint-aws>=1.0.0
+
+# --- Utilities ---
 typing-extensions>=4.10.0
