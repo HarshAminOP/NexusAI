@@ -1,0 +1,40 @@
+# ==========================================
+# NEXUSAI - GITIGNORE
+# ==========================================
+
+# 1. Python & Backend Ignored Files
+# ------------------------------------------
+# Ignore the virtual environment (sandbox)
+backend/.venv/
+venv/
+# Ignore Python cache files (compiled code that Python creates automatically)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 2. Node.js & Frontend Ignored Files
+# ------------------------------------------
+# Ignore the massive folder where JavaScript downloads its packages
+frontend/node_modules/
+# Ignore Next.js build outputs
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# 3. Environment Variables (CRITICAL SECURITY)
+# ------------------------------------------
+# NEVER upload your secret API keys to GitHub!
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+backend/.env
+frontend/.env
+
+# 4. OS Generated Files (Specific to Mac)
+# ------------------------------------------
+# Mac automatically creates these hidden files to store folder preferences. We don't want them in our code.
+.DS_Store
+.AppleDouble
+.LSOverride
