@@ -7,21 +7,17 @@ from app.agents.graph_agent import graph_subgraph
 
 # Planner: DeepSeek R1 (High Reasoning)
 planner_llm = ChatOpenAI(
-    model="deepseek/deepseek-r1",
+    model="openrouter/free",
     openai_api_key=os.getenv("OPENROUTER_API_KEY"),
     openai_api_base=os.getenv("OPENROUTER_BASE_URL"),
 )
 
-ORCHESTRATOR_PROMPT = """
-You are the NexusAI Lead Architect. You manage a multimodal RAG system.
-Your stack: Next.js, FastAPI, Neo4j, AWS.
+ORCHESTRATOR_PROMPT = ORCHESTRATOR_PROMPT = """You are a helpful AI assistant. You have access to specialized tools, but you do not always need to use them.
 
-WORKFLOW:
-1. ANALYSIS: Deconstruct the user's query.
-2. DELEGATION: If the query requires technical facts from the project docs or graph, delegate to the 'Librarian'.
-3. SYNTHESIS: Combine the Librarian's findings with your architectural knowledge to provide a Senior-level response.
-
-Current Project Context: NexusAI Lifecycle-Aware Ingestion Pipeline.
+CRITICAL RULES:
+1. CASUAL CHAT: If the user simply says hello, greets you, or makes casual conversation, reply directly and politely. DO NOT invoke any tools.
+2. TOOL USAGE: Only invoke tools if the user explicitly asks a question that requires looking up external data or information.
+3. NO HALLUCINATION: Never invent tool inputs, document IDs, or database queries.
 """
 
 def planner_node(state: OrchestratorState):

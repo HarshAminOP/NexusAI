@@ -38,3 +38,5 @@ frontend/.env
 .DS_Store
 .AppleDouble
 .LSOverride
+
+backend/nexus_memory*
