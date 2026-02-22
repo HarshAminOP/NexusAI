@@ -124,3 +124,65 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Custom Scrollbar Styles - Dark and transparent */
+.scrollbar-thin {
+  scrollbar-width: thin;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(51, 65, 85, 0.3); /* slate-700 with low opacity */
+  border-radius: 3px;
+  transition: all 0.2s ease;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(51, 65, 85, 0.5); /* slate-700 with medium opacity */
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:active {
+  background: rgba(51, 65, 85, 0.7); /* slate-700 with high opacity */
+}
+
+/* Dark theme scrollbars - even darker */
+.scrollbar-thin.scrollbar-thumb-slate-600\/50::-webkit-scrollbar-thumb {
+  background: rgba(30, 41, 59, 0.4); /* slate-800 with low opacity */
+}
+
+.scrollbar-thin.scrollbar-thumb-slate-600\/50::-webkit-scrollbar-thumb:hover {
+  background: rgba(30, 41, 59, 0.6); /* slate-800 with medium opacity */
+}
+
+.scrollbar-thin.scrollbar-thumb-slate-600\/50::-webkit-scrollbar-thumb:active {
+  background: rgba(30, 41, 59, 0.8); /* slate-800 with high opacity */
+}
+
+/* Light theme scrollbars - slightly lighter but still dark */
+.scrollbar-thin.scrollbar-thumb-slate-400\/50::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.4); /* slate-600 with low opacity */
+}
+
+.scrollbar-thin.scrollbar-thumb-slate-400\/50::-webkit-scrollbar-thumb:hover {
+  background: rgba(71, 85, 105, 0.6); /* slate-600 with medium opacity */
+}
+
+.scrollbar-thin.scrollbar-thumb-slate-400\/50::-webkit-scrollbar-thumb:active {
+  background: rgba(71, 85, 105, 0.8); /* slate-600 with high opacity */
+}
+
+.scrollbar-thin.scrollbar-thumb-slate-600\/70::-webkit-scrollbar-thumb:hover {
+  background: rgba(71, 85, 105, 0.6);
+}
+
+.scrollbar-thin.scrollbar-thumb-slate-600\/70::-webkit-scrollbar-thumb:active {
+  background: rgba(71, 85, 105, 0.8);
+}

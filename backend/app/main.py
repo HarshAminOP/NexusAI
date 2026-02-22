@@ -2,13 +2,12 @@ import os
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Annotated, List
 from dotenv import load_dotenv
 
 # FastAPI & AWS Bridge
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sse_starlette.sse import EventSourceResponse
+from fastapi.responses import StreamingResponse
 from mangum import Mangum
 
 # LangChain / LangGraph Core
@@ -54,7 +53,6 @@ def global_summarizer(state: OrchestratorState):
 def run_orchestrator(state: OrchestratorState):
     return master_app.invoke(state)
 
-# Define the workflow structure (Uncompiled)
 workflow = StateGraph(OrchestratorState)
 workflow.add_node("summarizer", global_summarizer)
 workflow.add_node("orchestrator", run_orchestrator)
@@ -63,34 +61,25 @@ workflow.add_edge("summarizer", "orchestrator")
 workflow.add_edge("orchestrator", END)
 
 # ==========================================
-# 2. LIFESPAN & PERSISTENCE (The Architect's Fix)
+# 2. LIFESPAN & PERSISTENCE
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manages the database connection lifecycle based on the environment."""
     logger.info("🚀 Booting NexusAI Lifespan Manager...")
     
     if IS_AWS:
-        # AWS ENVIRONMENT (DynamoDB)
         from langgraph_checkpoint_aws.dynamodb import DynamoDBSaver
         TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME", "NexusAI_Checkpoints")
         checkpointer = DynamoDBSaver(table_name=TABLE_NAME)
         logger.info("☁️ Connected to AWS DynamoDB Persistence")
-        
-        # Compile and store in global app state
         app.state.nexus_ai = workflow.compile(checkpointer=checkpointer)
-        yield # Server runs here
-        
+        yield 
     else:
-        # LOCAL MAC ENVIRONMENT (Async SQLite)
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
         logger.info("💻 Booting Local Async SQLite Persistence")
-        
-        # The 'async with' keeps the DB open for the lifetime of the server
         async with AsyncSqliteSaver.from_conn_string("nexus_memory.sqlite") as checkpointer:
-            # Compile and store in global app state
             app.state.nexus_ai = workflow.compile(checkpointer=checkpointer)
-            yield # Server runs here
+            yield 
 
 # ==========================================
 # 3. FASTAPI APP & ROUTES
@@ -107,11 +96,8 @@ app.add_middleware(
 
 @app.get("/chat/history/{thread_id}")
 async def get_history(thread_id: str, fast_req: Request):
-    """Retrieves the conversation history from the LangGraph checkpointer."""
     nexus_ai = fast_req.app.state.nexus_ai
     config = {"configurable": {"thread_id": thread_id}}
-    
-    # Fetch the state asynchronously from SQLite/DynamoDB
     state = await nexus_ai.aget_state(config)
     
     if not state.values or "messages" not in state.values:
@@ -119,14 +105,11 @@ async def get_history(thread_id: str, fast_req: Request):
         
     safe_messages = []
     for msg in state.values["messages"]:
-        # We only want to send Human and AI messages to the UI (ignoring Tool messages)
         if msg.type == "human":
             safe_messages.append({"role": "user", "content": msg.content})
         elif msg.type == "ai":
             content = msg.content or ""
             thought = ""
-            
-            # Extract DeepSeek R1 <think> tags if they exist in the history
             if "<think>" in content:
                 parts = content.split("</think>")
                 thought = parts[0].replace("<think>", "").strip()
@@ -142,38 +125,49 @@ async def get_history(thread_id: str, fast_req: Request):
 
 @app.post("/chat/stream")
 async def stream_chat(request: ChatRequest, fast_req: Request):
-    """Streams the response using the globally compiled graph."""
     config = {"configurable": {"thread_id": request.thread_id}}
     input_data = {"messages": [HumanMessage(content=request.message)]}
-    
-    # Retrieve the compiled AI from the application state
     nexus_ai = fast_req.app.state.nexus_ai
 
     async def event_generator():
         try:
-            async for event in nexus_ai.astream(input_data, config=config, stream_mode="updates"):
-                if event:
-                    for node_name, node_data in event.items():
-                        if "messages" in node_data:
-                            safe_messages = [
-                                {"role": getattr(m, "type", "assistant"), "content": m.content}
-                                for m in node_data["messages"]
-                            ]
-                            yield {
-                                "event": "message",
-                                "data": json.dumps({"node": node_name, "messages": safe_messages})
-                            }
+            # Emit initialization log
+            yield f"data: {json.dumps({'type': 'log', 'step': 'SYS_INIT', 'status': 'INFO'})}\n\n"
+            
+            # Use astream_events (v2) to catch tokens and custom dispatched events
+            async for event in nexus_ai.astream_events(input_data, config=config, version="v2"):
+                kind = event["event"]
+                
+                # 1. Catch LLM Tokens
+                if kind == "on_chat_model_stream":
+                    content = event["data"]["chunk"].content
+                    if content:
+                        yield f"data: {json.dumps({'type': 'text', 'content': content})}\n\n"
+                
+                # 2. Catch Custom Events (Graph payloads and specific logs from tools)
+                elif kind == "on_custom_event" and event["name"] == "nexus_stream":
+                    yield f"data: {json.dumps(event['data'])}\n\n"
+                
+                # 3. Catch Node Completions for UI Observability
+                elif kind == "on_chain_end":
+                    # Filter for actual nodes in the graph
+                    tags = event.get("tags", [])
+                    if "graph:node" in tags:
+                        node_name = event["name"]
+                        if node_name not in ["__start__", "__end__"]:
+                            yield f"data: {json.dumps({'type': 'log', 'step': f'{node_name.upper()}_COMPLETE', 'status': 'SUCCESS'})}\n\n"
+
+            yield "data: [DONE]\n\n"
+
         except Exception as e:
             logger.error(f"Streaming error: {str(e)}")
-            yield {
-                "event": "error", 
-                "data": json.dumps({"error": "Internal Brain Error"})
-            }
+            yield f"data: {json.dumps({'type': 'log', 'step': 'STREAM_ERROR', 'status': 'ERROR'})}\n\n"
+            yield "data: [DONE]\n\n"
 
-    return EventSourceResponse(event_generator())
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 # --- AWS LAMBDA HANDLER ---
-handler = Mangum(app, lifespan="off") # Mangum handles its own lifecycle in Lambda
+handler = Mangum(app, lifespan="off")
 
 if __name__ == "__main__":
     import uvicorn

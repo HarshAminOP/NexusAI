@@ -1,8 +1,33 @@
-from langchain_core.tools import tool
-from app.services.neo4j_service import graph_service
 import logging
+from langchain_core.tools import tool
+from langchain_core.callbacks.manager import dispatch_custom_event
+from app.services.neo4j_service import graph_service
 
 logger = logging.getLogger("GraphTool")
+
+def format_neo4j_for_ui(results):
+    """
+    Transforms raw Neo4j list of dicts into {nodes, links} for React Force Graph.
+    """
+    nodes = []
+    links = []
+    node_ids = set()
+
+    if not isinstance(results, list):
+        return {"nodes": nodes, "links": links}
+
+    for record in results:
+        if isinstance(record, dict):
+            for key, value in record.items():
+                if isinstance(value, dict) and 'id' in value:
+                    n_id = str(value['id'])
+                    if n_id not in node_ids:
+                        # Extract a label, defaulting to the ID if none exists
+                        label = value.get('name', value.get('label', n_id))
+                        nodes.append({"id": n_id, "label": label})
+                        node_ids.add(n_id)
+
+    return {"nodes": nodes, "links": links}
 
 @tool
 def execute_graph_query(cypher_query: str) -> str:
@@ -20,29 +45,34 @@ def execute_graph_query(cypher_query: str) -> str:
     Input: A valid Cypher string.
     Output: A string representation of the query results or an error message.
     """
-    # Note: The {schema_info} in the docstring is a placeholder. 
-    # In a dynamic production app, we refresh this schema context.
-    
     logger.info(f"🤖 Agent executing Cypher: {cypher_query}")
     
     try:
-        # We call our AWS-friendly service
+        # Dispatch start log to UI
+        dispatch_custom_event("nexus_stream", {"type": "log", "step": "NEO4J_QUERY_START", "status": "INFO"})
+        
         results = graph_service.run_read_query(cypher_query)
         
         if not results:
+            dispatch_custom_event("nexus_stream", {"type": "log", "step": "NEO4J_QUERY_EMPTY", "status": "WARNING"})
             return "No results found for that query. Try broadening your search or checking relationship types."
             
         if isinstance(results, list) and len(results) > 0 and "error" in results[0]:
+            dispatch_custom_event("nexus_stream", {"type": "log", "step": "CYPHER_SYNTAX_ERROR", "status": "ERROR"})
             return f"Cypher Syntax Error: {results[0]['error']}. Please correct the query and try again."
 
-        # Convert the list of dicts into a readable string for the LLM
+        # Format and dispatch graph data to bypass LLM
+        ui_graph = format_neo4j_for_ui(results)
+        dispatch_custom_event("nexus_stream", {"type": "graph", "payload": ui_graph})
+        dispatch_custom_event("nexus_stream", {"type": "log", "step": "GRAPH_FETCHED", "status": "SUCCESS"})
+
         return str(results)
         
     except Exception as e:
+        dispatch_custom_event("nexus_stream", {"type": "log", "step": "NEO4J_SYSTEM_ERROR", "status": "ERROR"})
         return f"System Error executing graph search: {str(e)}"
 
-# We manually update the docstring with real schema info at runtime
-# This is a 'Senior Architect' move to ensure the LLM always has the ground truth.
+# Dynamically inject schema into the docstring
 try:
     schema = graph_service.get_schema()
     execute_graph_query.description = execute_graph_query.description.format(schema_info=schema)
